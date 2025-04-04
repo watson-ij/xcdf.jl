@@ -172,7 +172,7 @@ function unpackFileTrailer(frame::XcdfFrame, version::UInt32)
 end
 
 mutable struct XcdfBlockData
-    data::Vector{UInt8}
+    data::Vector{UInt64}
     index::UInt
     indexBits::UInt
 end
@@ -184,6 +184,7 @@ mutable struct XcdfField{T}
     activeMin::T
     activeMax::T
     value::T
+    type::UInt8
 end
 
 mutable struct Xcdf
@@ -213,7 +214,7 @@ function openXcdf(filename::String)
         T = UInt64
         if header.fieldDescriptors[i].type == XCDF_SIGNED_INTEGER T = Int64 end
         if header.fieldDescriptors[i].type == XCDF_FLOATING_POINT T = Float64 end
-        fields[i] = XcdfField{T}(Ptr{XcdfField}(), reinterpret(T, header.fieldDescriptors[i].rawResolution), 0, 0, 0, 0)
+        fields[i] = XcdfField{T}(Ptr{XcdfField}(), reinterpret(T, header.fieldDescriptors[i].rawResolution), 0, 0, 0, 0, header.fieldDescriptors[i].type)
     end
     return Xcdf(file, header, trailer,fields, endHeaderPtr, XcdfBlockData([], 1, 0), 0, 0, 0)
 end
@@ -243,34 +244,22 @@ function calculateValue(field::XcdfField, datum::UInt64)
     field.value = datum * field.resolution + field.activeMin
 end
 
-function calculateValue(field::XcdfField{UInt64}, datum::UInt64)
-    field.value = datum * field.resolution + field.activeMin
-end
-
-function calculateValue(field::XcdfField{Int64}, datum::UInt64)
-    field.value = Int64(datum) * field.resolution + field.activeMin
-end
-
-function calculateValue(field::XcdfField{Float64}, datum::UInt64)
-    field.value = Float64(datum) * field.resolution + field.activeMin
-end
-
 function getDatum(data::XcdfBlockData, size::UInt32)::UInt64
     # println("size: ", size, " index: ", data.index)
     if size == 0
         return UInt64(0x0)
     end
-    datum = reinterpret(UInt64, data.data[data.index:data.index+7])[1] >> data.indexBits
+    @inbounds datum = data.data[data.index] >> data.indexBits
     tot = size + data.indexBits
     if tot > 64 # data spread across 9 bytes
-        datum |= UInt64(data.data[data.index+8]) << (64 - data.indexBits)
+        @inbounds datum |= UInt64(data.data[data.index+1]) << (64 - data.indexBits)
     end
     if size < 64
         mask = UInt64((UInt64(1) << size) - 1)
         datum &= mask
     end
-    data.index += tot >> 3
-    data.indexBits = tot & 0x07
+    data.index += tot >> 6
+    data.indexBits = tot & 0x3f
     return datum
 end
 
@@ -282,7 +271,7 @@ function xcdfReadEvent(x::Xcdf)
         end
     end
     for field in x.fields
-        datum = getDatum(x.blockData, field.activeSize) 
+        datum = getDatum(x.blockData, field.activeSize)
         calculateValue(field, datum)
     end
     x.blockEventCount -= 1
@@ -293,9 +282,10 @@ end
 
 function unpackBlockData(frame::XcdfFrame)
     array = xcdfArray(frame)
-    for i in 1:8 # make sure we have enough space at the end to unpack the bits into uint64
-        push!(array, 0)
+    while length(array) % 8 != 0
+        push!(array, 0x0)
     end
+    array = reinterpret(UInt64, array)
     return XcdfBlockData(array, 1, 0)
 end
 
@@ -382,15 +372,14 @@ function main()
     x = openXcdf(fname)
     # print(x)
     ii = 0
-    #Profile.@profile
-    (for (idx, event) in enumerate(x)
+    Profile.@profile (for (idx, event) in enumerate(x)
         ii += 1
-        # if ii > 0
+        # if ii > 1000
         #     break
         # end
     end)
     println(ii, " events")
-    #open(Profile.print, "prot.txt", "w")
+    open(Profile.print, "prot.txt", "w")
 end
 
 if abspath(PROGRAM_FILE) == @__FILE__
